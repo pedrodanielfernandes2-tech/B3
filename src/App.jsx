@@ -78,35 +78,35 @@ function saveWatchlist(list) {
     console.error("Falha ao salvar lista", e);
   }
 }
-function loadToken() {
+function loadKey(name) {
   try {
-    return localStorage.getItem("b3-token") || "";
+    return localStorage.getItem(name) || "";
   } catch (e) {
     return "";
   }
 }
-function saveToken(token) {
+function saveKey(name, value) {
   try {
-    if (token) localStorage.setItem("b3-token", token);
-    else localStorage.removeItem("b3-token");
+    if (value) localStorage.setItem(name, value);
+    else localStorage.removeItem(name);
   } catch (e) {
-    console.error("Falha ao salvar token", e);
+    console.error("Falha ao salvar chave", e);
   }
 }
 
-// ---------- API ----------
-async function fetchTicker(ticker, token) {
+// ---------- API: brapi.dev (fonte principal) ----------
+async function fetchFromBrapi(ticker, token) {
   const params = new URLSearchParams({ range: "3mo", interval: "1d" });
   if (token) params.set("token", token);
   const url = `https://brapi.dev/api/quote/${encodeURIComponent(ticker)}?${params.toString()}`;
   const res = await fetch(url);
   if (!res.ok) {
-    if (res.status === 401) throw new Error("Token inválido ou ausente para este papel");
-    throw new Error(`Falha na consulta (${res.status})`);
+    if (res.status === 401) throw new Error("token inválido ou ausente para este papel");
+    throw new Error(`falha na consulta (${res.status})`);
   }
   const data = await res.json();
   if (!data.results || data.results.length === 0) {
-    throw new Error("Ticker não encontrado");
+    throw new Error("ticker não encontrado");
   }
   const r = data.results[0];
   const closes = (r.historicalDataPrice || [])
@@ -119,7 +119,62 @@ async function fetchTicker(ticker, token) {
     changePercent: r.regularMarketChangePercent,
     currency: r.currency || "BRL",
     closes,
+    source: "brapi",
   };
+}
+
+// ---------- API: bolsai (fallback) ----------
+// Plano gratuito da bolsai não inclui histórico (endpoint PRO), então o card
+// mostra preço e variação do dia, mas os indicadores técnicos ficam indisponíveis.
+async function fetchFromBolsai(ticker, apiKey) {
+  if (!apiKey) throw new Error("nenhuma chave da bolsai configurada");
+  const headers = { "X-API-Key": apiKey };
+  const quoteRes = await fetch(`https://api.usebolsai.com/api/v1/stocks/${encodeURIComponent(ticker)}/quote`, {
+    headers,
+  });
+  if (!quoteRes.ok) {
+    if (quoteRes.status === 401) throw new Error("chave da bolsai inválida");
+    if (quoteRes.status === 404) throw new Error("ticker não encontrado");
+    throw new Error(`falha na consulta (${quoteRes.status})`);
+  }
+  const quote = await quoteRes.json();
+
+  let changePercent = 0;
+  try {
+    const statsRes = await fetch(`https://api.usebolsai.com/api/v1/stocks/${encodeURIComponent(ticker)}/stats`, {
+      headers,
+    });
+    if (statsRes.ok) {
+      const stats = await statsRes.json();
+      if (typeof stats.daily_change_pct === "number") changePercent = stats.daily_change_pct;
+    }
+  } catch (e) {
+    /* estatísticas são um extra; segue sem elas se falhar */
+  }
+
+  return {
+    symbol: quote.ticker,
+    name: quote.ticker,
+    price: quote.close,
+    changePercent,
+    currency: "BRL",
+    closes: [],
+    source: "bolsai",
+  };
+}
+
+// ---------- API: tenta brapi, cai para bolsai se falhar ----------
+async function fetchTicker(ticker, brapiToken, bolsaiKey) {
+  try {
+    return await fetchFromBrapi(ticker, brapiToken);
+  } catch (brapiErr) {
+    if (!bolsaiKey) throw brapiErr;
+    try {
+      return await fetchFromBolsai(ticker, bolsaiKey);
+    } catch (bolsaiErr) {
+      throw new Error(`brapi: ${brapiErr.message} · bolsai: ${bolsaiErr.message}`);
+    }
+  }
 }
 
 // ---------- signal pill ----------
@@ -143,15 +198,15 @@ function SignalPill({ tone, label }) {
 }
 
 // ---------- ticker card ----------
-function TickerCard({ ticker, token, onRemove }) {
+function TickerCard({ ticker, token, bolsaiKey, onRemove }) {
   const [state, setState] = useState({ status: "loading", data: null, error: null });
 
   const load = useCallback(() => {
     setState({ status: "loading", data: null, error: null });
-    fetchTicker(ticker, token)
+    fetchTicker(ticker, token, bolsaiKey)
       .then((data) => setState({ status: "ready", data, error: null }))
       .catch((err) => setState({ status: "error", data: null, error: err.message }));
-  }, [ticker, token]);
+  }, [ticker, token, bolsaiKey]);
 
   useEffect(() => {
     load();
@@ -241,6 +296,15 @@ function TickerCard({ ticker, token, onRemove }) {
               {isUp ? "▲" : "▼"} {Math.abs(state.data.changePercent || 0).toFixed(2)}%
             </div>
           </div>
+
+          {state.data.source === "bolsai" && (
+            <div
+              className="text-[10px] rounded-md px-2 py-1"
+              style={{ background: TOKENS.neutralBg, color: TOKENS.neutral }}
+            >
+              brapi indisponível — usando bolsai (sem histórico no plano grátis)
+            </div>
+          )}
 
           {chartData.length > 1 && (
             <div style={{ height: 56 }}>
@@ -336,7 +400,8 @@ function TickerTape({ tickers }) {
 export default function App() {
   const [tickers, setTickers] = useState(() => loadWatchlist() || DEFAULT_TICKERS);
   const [input, setInput] = useState("");
-  const [token, setToken] = useState(() => loadToken());
+  const [token, setToken] = useState(() => loadKey("b3-token"));
+  const [bolsaiKey, setBolsaiKey] = useState(() => loadKey("b3-bolsai-key"));
   const [showSettings, setShowSettings] = useState(false);
 
   useEffect(() => {
@@ -360,7 +425,12 @@ export default function App() {
 
   const handleTokenChange = (val) => {
     setToken(val);
-    saveToken(val);
+    saveKey("b3-token", val);
+  };
+
+  const handleBolsaiKeyChange = (val) => {
+    setBolsaiKey(val);
+    saveKey("b3-bolsai-key", val);
   };
 
   return (
@@ -436,12 +506,24 @@ export default function App() {
               className="w-full rounded-md px-3 py-2 text-xs outline-none font-mono"
               style={{ background: TOKENS.bg, border: `1px solid ${TOKENS.panelBorder}`, color: TOKENS.cream }}
             />
+            <p className="mt-3 mb-2">
+              Opcional: chave da <span style={{ color: TOKENS.gold }}>bolsai</span> como fallback — se a brapi
+              falhar, o app tenta buscar preço e variação por lá (sem histórico no plano grátis, então os
+              indicadores técnicos não aparecem nesse caso).
+            </p>
+            <input
+              value={bolsaiKey}
+              onChange={(e) => handleBolsaiKeyChange(e.target.value)}
+              placeholder="Chave da bolsai (opcional, fallback)"
+              className="w-full rounded-md px-3 py-2 text-xs outline-none font-mono"
+              style={{ background: TOKENS.bg, border: `1px solid ${TOKENS.panelBorder}`, color: TOKENS.cream }}
+            />
           </div>
         )}
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           {tickers.map((t) => (
-            <TickerCard key={t} ticker={t} token={token} onRemove={removeTicker} />
+            <TickerCard key={t} ticker={t} token={token} bolsaiKey={bolsaiKey} onRemove={removeTicker} />
           ))}
         </div>
 
