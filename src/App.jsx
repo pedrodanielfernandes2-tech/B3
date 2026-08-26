@@ -1,6 +1,7 @@
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { LineChart, Line, ResponsiveContainer } from "recharts";
-import { Plus, X, TrendingUp, TrendingDown, Minus, RefreshCw, Settings2, AlertTriangle } from "lucide-react";
+import { Plus, X, TrendingUp, TrendingDown, Minus, RefreshCw, Settings2, AlertTriangle, Bell, BellOff } from "lucide-react";
+import { isPushSupported, subscribeToPush, sendSubscriptionToServer, removeSubscriptionFromServer } from "./push.js";
 
 // ---------- design tokens ----------
 const TOKENS = {
@@ -103,6 +104,23 @@ function calcPosition(qty, avgPrice, currentPrice) {
   const pl = current - invested;
   const plPct = invested > 0 ? (pl / invested) * 100 : 0;
   return { invested, current, pl, plPct };
+}
+
+function loadAlertConfigs() {
+  try {
+    const raw = localStorage.getItem("b3-alert-configs");
+    if (raw) return JSON.parse(raw);
+  } catch (e) {
+    /* nada salvo ainda */
+  }
+  return {};
+}
+function saveAlertConfigs(configs) {
+  try {
+    localStorage.setItem("b3-alert-configs", JSON.stringify(configs));
+  } catch (e) {
+    console.error("Falha ao salvar alertas", e);
+  }
 }
 function loadKey(name) {
   try {
@@ -224,7 +242,7 @@ function SignalPill({ tone, label }) {
 }
 
 // ---------- ticker card ----------
-function TickerCard({ ticker, token, bolsaiKey, position, onPositionChange, onPriceUpdate, onRemove }) {
+function TickerCard({ ticker, token, bolsaiKey, position, onPositionChange, onPriceUpdate, alertConfig, onAlertConfigChange, onRemove }) {
   const [state, setState] = useState({ status: "loading", data: null, error: null });
 
   const load = useCallback(() => {
@@ -438,6 +456,54 @@ function TickerCard({ ticker, token, bolsaiKey, position, onPositionChange, onPr
               </div>
             )}
           </div>
+
+          <div className="pt-2 mt-1" style={{ borderTop: `1px dashed ${TOKENS.panelBorder}` }}>
+            <div className="text-[10px] uppercase tracking-wider mb-2" style={{ color: TOKENS.creamDim }}>
+              Alertas
+            </div>
+            <div className="flex flex-col gap-1.5 mb-2">
+              <label className="flex items-center gap-2 text-xs" style={{ color: TOKENS.cream }}>
+                <input
+                  type="checkbox"
+                  checked={!!alertConfig?.onBuy}
+                  onChange={(e) => onAlertConfigChange(ticker, "onBuy", e.target.checked)}
+                />
+                Avisar quando virar tendência de alta
+              </label>
+              <label className="flex items-center gap-2 text-xs" style={{ color: TOKENS.cream }}>
+                <input
+                  type="checkbox"
+                  checked={!!alertConfig?.onSell}
+                  onChange={(e) => onAlertConfigChange(ticker, "onSell", e.target.checked)}
+                />
+                Avisar quando virar tendência de baixa
+              </label>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                inputMode="decimal"
+                value={alertConfig?.priceAbove ?? ""}
+                onChange={(e) => onAlertConfigChange(ticker, "priceAbove", e.target.value)}
+                placeholder="Avisar se ≥ R$"
+                className="rounded-md px-2 py-1.5 text-xs outline-none font-mono"
+                style={{ background: TOKENS.bg, border: `1px solid ${TOKENS.panelBorder}`, color: TOKENS.cream }}
+              />
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                inputMode="decimal"
+                value={alertConfig?.priceBelow ?? ""}
+                onChange={(e) => onAlertConfigChange(ticker, "priceBelow", e.target.value)}
+                placeholder="Avisar se ≤ R$"
+                className="rounded-md px-2 py-1.5 text-xs outline-none font-mono"
+                style={{ background: TOKENS.bg, border: `1px solid ${TOKENS.panelBorder}`, color: TOKENS.cream }}
+              />
+            </div>
+          </div>
         </>
       )}
     </div>
@@ -483,10 +549,62 @@ export default function App() {
   const [tickers, setTickers] = useState(() => loadWatchlist() || DEFAULT_TICKERS);
   const [positions, setPositions] = useState(() => loadPositions());
   const [prices, setPrices] = useState({});
+  const [alertConfigs, setAlertConfigs] = useState(() => loadAlertConfigs());
+  const [pushStatus, setPushStatus] = useState("idle"); // idle | loading | enabled | error
+  const [pushError, setPushError] = useState("");
   const [input, setInput] = useState("");
   const [token, setToken] = useState(() => loadKey("b3-token"));
   const [bolsaiKey, setBolsaiKey] = useState(() => loadKey("b3-bolsai-key"));
   const [showSettings, setShowSettings] = useState(false);
+
+  useEffect(() => {
+    saveAlertConfigs(alertConfigs);
+  }, [alertConfigs]);
+
+  const handleAlertConfigChange = (ticker, field, value) => {
+    setAlertConfigs((prev) => ({
+      ...prev,
+      [ticker]: { ...prev[ticker], [field]: value },
+    }));
+  };
+
+  // Reenvia a inscrição sempre que os alertas ou tokens mudam, mantendo o
+  // servidor sincronizado com o que cada card está configurado para checar.
+  const syncTimer = useRef(null);
+  useEffect(() => {
+    if (pushStatus !== "enabled") return;
+    if (syncTimer.current) clearTimeout(syncTimer.current);
+    syncTimer.current = setTimeout(async () => {
+      try {
+        const registration = await navigator.serviceWorker.ready;
+        const subscription = await registration.pushManager.getSubscription();
+        if (subscription) {
+          await sendSubscriptionToServer(subscription.toJSON(), alertConfigs, token, bolsaiKey);
+        }
+      } catch (e) {
+        console.error("Falha ao sincronizar alertas", e);
+      }
+    }, 800);
+    return () => clearTimeout(syncTimer.current);
+  }, [alertConfigs, token, bolsaiKey, pushStatus]);
+
+  const enablePush = async () => {
+    setPushStatus("loading");
+    setPushError("");
+    try {
+      const subscription = await subscribeToPush();
+      await sendSubscriptionToServer(subscription.toJSON(), alertConfigs, token, bolsaiKey);
+      setPushStatus("enabled");
+    } catch (e) {
+      setPushStatus("error");
+      setPushError(e.message);
+    }
+  };
+
+  const disablePush = async () => {
+    await removeSubscriptionFromServer();
+    setPushStatus("idle");
+  };
 
   useEffect(() => {
     savePositions(positions);
@@ -669,6 +787,37 @@ export default function App() {
               className="w-full rounded-md px-3 py-2 text-xs outline-none font-mono"
               style={{ background: TOKENS.bg, border: `1px solid ${TOKENS.panelBorder}`, color: TOKENS.cream }}
             />
+
+            <div className="mt-4 pt-3" style={{ borderTop: `1px solid ${TOKENS.panelBorder}` }}>
+              <p className="mb-2">
+                Alertas por notificação: configure em cada papel quando quer ser avisado (mudança de sinal ou
+                preço-alvo), depois ative aqui. Funciona mesmo com o app fechado, checado a cada poucos minutos.
+              </p>
+              {pushStatus === "enabled" ? (
+                <button
+                  onClick={disablePush}
+                  className="w-full flex items-center justify-center gap-2 rounded-md px-3 py-2 text-xs font-semibold"
+                  style={{ background: TOKENS.downBg, color: TOKENS.down }}
+                >
+                  <BellOff size={14} /> Desativar alertas por notificação
+                </button>
+              ) : (
+                <button
+                  onClick={enablePush}
+                  disabled={pushStatus === "loading"}
+                  className="w-full flex items-center justify-center gap-2 rounded-md px-3 py-2 text-xs font-semibold"
+                  style={{ background: TOKENS.gold, color: TOKENS.bg }}
+                >
+                  <Bell size={14} />
+                  {pushStatus === "loading" ? "Ativando..." : "Ativar alertas por notificação"}
+                </button>
+              )}
+              {pushStatus === "error" && (
+                <p className="mt-2" style={{ color: TOKENS.down }}>
+                  {pushError}
+                </p>
+              )}
+            </div>
           </div>
         )}
 
@@ -682,6 +831,8 @@ export default function App() {
               position={positions[t]}
               onPositionChange={handlePositionChange}
               onPriceUpdate={handlePriceUpdate}
+              alertConfig={alertConfigs[t]}
+              onAlertConfigChange={handleAlertConfigChange}
               onRemove={removeTicker}
             />
           ))}
