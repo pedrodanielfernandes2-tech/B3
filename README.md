@@ -31,8 +31,12 @@ gratuitos, além do próprio projeto na Vercel.
 1. Abra seu projeto no [supabase.com](https://supabase.com) → **SQL Editor → New query**.
 2. Cole o conteúdo do arquivo `supabase/schema.sql` (incluso neste projeto) e clique em **Run**.
    Isso cria as duas tabelinhas que guardam quem quer alerta de quê.
-3. Vá em **Project Settings → API** e copie dois valores: **Project URL** e a chave
-   **service_role** (não é a `anon` — essa fica só no servidor, nunca é exposta ao navegador).
+3. Vá em **Project Settings → API**. No topo da página copie a **Project URL**. Depois, na
+   seção **"Secret keys"** (aba "Publishable and secret API keys"), copie a chave `default`
+   que começa com `sb_secret_...` — clique no ícone do olho para revelar o valor completo.
+   Essa é a chave privada, que nunca deve ser exposta ao navegador (se a interface da Supabase
+   ainda mostrar a aba antiga "Legacy anon, service_role API keys" no seu projeto, a chave
+   `service_role` de lá funciona do mesmo jeito).
 
 ### 2. Configurar as variáveis de ambiente na Vercel
 
