@@ -2,7 +2,7 @@
 // da biblioteca @supabase/supabase-js. Usa a chave "service_role", que só
 // existe aqui no backend e nunca é enviada ao navegador.
 
-const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 async function rest(path, options = {}) {
