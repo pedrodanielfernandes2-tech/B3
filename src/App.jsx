@@ -78,6 +78,32 @@ function saveWatchlist(list) {
     console.error("Falha ao salvar lista", e);
   }
 }
+
+function loadPositions() {
+  try {
+    const raw = localStorage.getItem("b3-positions");
+    if (raw) return JSON.parse(raw);
+  } catch (e) {
+    /* nada salvo ainda */
+  }
+  return {};
+}
+function savePositions(positions) {
+  try {
+    localStorage.setItem("b3-positions", JSON.stringify(positions));
+  } catch (e) {
+    console.error("Falha ao salvar posições", e);
+  }
+}
+
+function calcPosition(qty, avgPrice, currentPrice) {
+  if (!qty || !avgPrice || currentPrice == null) return null;
+  const invested = qty * avgPrice;
+  const current = qty * currentPrice;
+  const pl = current - invested;
+  const plPct = invested > 0 ? (pl / invested) * 100 : 0;
+  return { invested, current, pl, plPct };
+}
 function loadKey(name) {
   try {
     return localStorage.getItem(name) || "";
@@ -198,7 +224,7 @@ function SignalPill({ tone, label }) {
 }
 
 // ---------- ticker card ----------
-function TickerCard({ ticker, token, bolsaiKey, onRemove }) {
+function TickerCard({ ticker, token, bolsaiKey, position, onPositionChange, onPriceUpdate, onRemove }) {
   const [state, setState] = useState({ status: "loading", data: null, error: null });
 
   const load = useCallback(() => {
@@ -212,6 +238,12 @@ function TickerCard({ ticker, token, bolsaiKey, onRemove }) {
     load();
   }, [load]);
 
+  useEffect(() => {
+    if (state.status === "ready" && state.data) {
+      onPriceUpdate(ticker, state.data.price);
+    }
+  }, [state.status, state.data, ticker, onPriceUpdate]);
+
   const indicators = useMemo(() => {
     if (!state.data) return null;
     const sma9 = calcSMA(state.data.closes, 9);
@@ -224,6 +256,11 @@ function TickerCard({ ticker, token, bolsaiKey, onRemove }) {
     if (!state.data) return [];
     return state.data.closes.map((c, i) => ({ i, c }));
   }, [state.data]);
+
+  const posResult = useMemo(() => {
+    if (!state.data) return null;
+    return calcPosition(position?.qty, position?.avgPrice, state.data.price);
+  }, [state.data, position]);
 
   const isUp = state.data && state.data.changePercent >= 0;
 
@@ -356,6 +393,51 @@ function TickerCard({ ticker, token, bolsaiKey, onRemove }) {
               <SignalPill tone={indicators.signal.tone} label={indicators.signal.label} />
             </div>
           )}
+
+          <div className="pt-2 mt-1" style={{ borderTop: `1px dashed ${TOKENS.panelBorder}` }}>
+            <div className="text-[10px] uppercase tracking-wider mb-2" style={{ color: TOKENS.creamDim }}>
+              Minha posição
+            </div>
+            <div className="grid grid-cols-2 gap-2 mb-2">
+              <input
+                type="number"
+                min="0"
+                inputMode="decimal"
+                value={position?.qty ?? ""}
+                onChange={(e) => onPositionChange(ticker, "qty", e.target.value)}
+                placeholder="Quantidade"
+                className="rounded-md px-2 py-1.5 text-xs outline-none font-mono"
+                style={{ background: TOKENS.bg, border: `1px solid ${TOKENS.panelBorder}`, color: TOKENS.cream }}
+              />
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                inputMode="decimal"
+                value={position?.avgPrice ?? ""}
+                onChange={(e) => onPositionChange(ticker, "avgPrice", e.target.value)}
+                placeholder="Preço médio"
+                className="rounded-md px-2 py-1.5 text-xs outline-none font-mono"
+                style={{ background: TOKENS.bg, border: `1px solid ${TOKENS.panelBorder}`, color: TOKENS.cream }}
+              />
+            </div>
+
+            {posResult && (
+              <div className="flex items-center justify-between text-xs">
+                <div style={{ color: TOKENS.creamDim }}>
+                  Investido <span className="font-mono">{fmtBRL(posResult.invested)}</span>
+                </div>
+                <div
+                  className="font-mono font-semibold"
+                  style={{ color: posResult.pl >= 0 ? TOKENS.up : TOKENS.down }}
+                >
+                  {posResult.pl >= 0 ? "+" : ""}
+                  {fmtBRL(posResult.pl)} ({posResult.plPct >= 0 ? "+" : ""}
+                  {posResult.plPct.toFixed(1)}%)
+                </div>
+              </div>
+            )}
+          </div>
         </>
       )}
     </div>
@@ -399,10 +481,43 @@ function TickerTape({ tickers }) {
 // ---------- main app ----------
 export default function App() {
   const [tickers, setTickers] = useState(() => loadWatchlist() || DEFAULT_TICKERS);
+  const [positions, setPositions] = useState(() => loadPositions());
+  const [prices, setPrices] = useState({});
   const [input, setInput] = useState("");
   const [token, setToken] = useState(() => loadKey("b3-token"));
   const [bolsaiKey, setBolsaiKey] = useState(() => loadKey("b3-bolsai-key"));
   const [showSettings, setShowSettings] = useState(false);
+
+  useEffect(() => {
+    savePositions(positions);
+  }, [positions]);
+
+  const handlePositionChange = (ticker, field, value) => {
+    setPositions((prev) => ({
+      ...prev,
+      [ticker]: { ...prev[ticker], [field]: value === "" ? "" : Number(value) },
+    }));
+  };
+
+  const totalSummary = useMemo(() => {
+    let invested = 0;
+    let current = 0;
+    let hasAny = false;
+    for (const t of tickers) {
+      const pos = positions[t];
+      const price = prices[t];
+      const result = calcPosition(pos?.qty, pos?.avgPrice, price);
+      if (result) {
+        hasAny = true;
+        invested += result.invested;
+        current += result.current;
+      }
+    }
+    if (!hasAny) return null;
+    const pl = current - invested;
+    const plPct = invested > 0 ? (pl / invested) * 100 : 0;
+    return { invested, current, pl, plPct };
+  }, [tickers, positions, prices]);
 
   useEffect(() => {
     saveWatchlist(tickers);
@@ -433,6 +548,10 @@ export default function App() {
     saveKey("b3-bolsai-key", val);
   };
 
+  const handlePriceUpdate = useCallback((ticker, price) => {
+    setPrices((prev) => (prev[ticker] === price ? prev : { ...prev, [ticker]: price }));
+  }, []);
+
   return (
     <div
       className="min-h-screen w-full"
@@ -458,6 +577,38 @@ export default function App() {
             Médias móveis e RSI calculados a partir do histórico de cada papel.
           </p>
         </header>
+
+        {totalSummary && (
+          <div
+            className="rounded-xl p-4 mb-5 flex items-center justify-between flex-wrap gap-2"
+            style={{ background: TOKENS.panel, border: `1px solid ${TOKENS.panelBorder}` }}
+          >
+            <div>
+              <div className="text-[10px] uppercase tracking-wider mb-0.5" style={{ color: TOKENS.creamDim }}>
+                Carteira · valor atual
+              </div>
+              <div
+                className="text-xl font-bold"
+                style={{ fontFamily: "'IBM Plex Mono', monospace", color: TOKENS.cream }}
+              >
+                {fmtBRL(totalSummary.current)}
+              </div>
+            </div>
+            <div className="text-right">
+              <div className="text-[10px] uppercase tracking-wider mb-0.5" style={{ color: TOKENS.creamDim }}>
+                Resultado
+              </div>
+              <div
+                className="text-xl font-bold font-mono"
+                style={{ color: totalSummary.pl >= 0 ? TOKENS.up : TOKENS.down }}
+              >
+                {totalSummary.pl >= 0 ? "+" : ""}
+                {fmtBRL(totalSummary.pl)} ({totalSummary.plPct >= 0 ? "+" : ""}
+                {totalSummary.plPct.toFixed(1)}%)
+              </div>
+            </div>
+          </div>
+        )}
 
         <div className="flex gap-2 mb-3">
           <input
@@ -523,7 +674,16 @@ export default function App() {
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           {tickers.map((t) => (
-            <TickerCard key={t} ticker={t} token={token} bolsaiKey={bolsaiKey} onRemove={removeTicker} />
+            <TickerCard
+              key={t}
+              ticker={t}
+              token={token}
+              bolsaiKey={bolsaiKey}
+              position={positions[t]}
+              onPositionChange={handlePositionChange}
+              onPriceUpdate={handlePriceUpdate}
+              onRemove={removeTicker}
+            />
           ))}
         </div>
 
